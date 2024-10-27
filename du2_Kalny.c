@@ -5,43 +5,40 @@
 #include <stdio.h>
 #include <windows.h>
 
-void* (*original_malloc)(size_t size); // should this be void* or ULONGULONG*? idk
-void* (*original_realloc)(void*ptr, size_t new_size);
-void* (*original_calloc)(size_t num, size_t size);
-void* original_free;
-void** IAT_ENTRIES[5]; // malloc, realloc, calloc, free
-
+void* (*original_malloc)(size_t size) = NULL; // should this be void* or ULONGULONG*? idk
+void* (*original_realloc)(void*ptr, size_t new_size) = NULL;
+void* (*original_calloc)(size_t num, size_t size) = NULL ;
+void (*original_free)(void *ptr) = NULL;
+void** IAT_ENTRIES[5] = {NULL}; // malloc, realloc, calloc, free
+#define ARR_SIZE 1000
 DWORD oldprotect;
 
 typedef struct AllocationRecord {
-    int i;
+    char allocated;
     size_t size;
     void* ptr;
 }AllocationRecord;
 
-AllocationRecord allocated_memory[1000];
-
+AllocationRecord allocated_memory[ARR_SIZE];
+int counter = 0;
 void initialise_allocation_records() {
-    for (int i = 0; i < size(allocated_memory); i++) {
-        allocated_memory[i].i = i;
-        allocated_memory[i].size = 0;
+    for (int i = 0; i < ARR_SIZE; i++) {
+        allocated_memory[i].allocated = 'n';
+        allocated_memory[i].size = (size_t) 0;
         allocated_memory[i].ptr = NULL;
     }
 }
 
 void* MallocDebug_malloc(size_t size);
 void* MallocDebug_realloc(void* ptr, size_t new_size);
+void MallocDebug_free(void* ptr);
+void* MallocDebug_calloc(size_t num, size_t size);
 
-PIMAGE_NT_HEADERS get_NT_Headers() {
-    HMODULE hPEFile = GetModuleHandle(NULL); // NULL means current process
-    PIMAGE_DOS_HEADER pDosHeader = (PIMAGE_DOS_HEADER)hPEFile;
-    printf("Address of hPEFile: %p\n", (void*)hPEFile);
-    printf("Starting address of the process %p\n", (BYTE*)pDosHeader);
-    // pDosHeader->e_lfanew RVA 
-    PIMAGE_NT_HEADERS pNTHeaders = (PIMAGE_NT_HEADERS)(((BYTE*)pDosHeader) + pDosHeader->e_lfanew);
-    return pNTHeaders;
-}
-void MallocDebug_Done() {
+
+int MallocDebug_Done() {
+    int n_leaks = check_leaky_memory();
+    printf("%d leak(s) identified\n", n_leaks);
+
     HMODULE hPEFile = GetModuleHandle(NULL); // NULL means current process
     PIMAGE_DOS_HEADER pDosHeader = (PIMAGE_DOS_HEADER)hPEFile;
 
@@ -62,24 +59,40 @@ void MallocDebug_Done() {
                 // Import by name
                 IMAGE_IMPORT_BY_NAME* pImportByName = (IMAGE_IMPORT_BY_NAME*)(pOriginalThunk->u1.AddressOfData + (BYTE*)pDosHeader);
                 if (strcmp(pImportByName->Name, "malloc") == 0) {
-                    VirtualProtect(IAT_ENTRIES[0], sizeof(DWORD), PAGE_EXECUTE_READWRITE, &oldprotect);
+                    if (original_malloc == NULL) {
+                        pOriginalThunk++;
+                        continue;
+                    }
+                    VirtualProtect(IAT_ENTRIES[0], sizeof(void *), PAGE_EXECUTE_READWRITE, &oldprotect);
                     *(IAT_ENTRIES[0]) = original_malloc;
-                    VirtualProtect(IAT_ENTRIES[0], sizeof(DWORD), oldprotect, &oldprotect);
+                    VirtualProtect(IAT_ENTRIES[0], sizeof(void *), oldprotect, &oldprotect);
                 }
                 else if (strcmp(pImportByName->Name, "realloc") == 0) {
-                    VirtualProtect(IAT_ENTRIES[1], sizeof(DWORD), PAGE_EXECUTE_READWRITE, &oldprotect);
+                    if (original_realloc == NULL) {
+                        pOriginalThunk++;
+                        continue;
+                    }
+                    VirtualProtect(IAT_ENTRIES[1], sizeof(void *), PAGE_EXECUTE_READWRITE, &oldprotect);
                     *(IAT_ENTRIES[0]) = original_realloc;
-                    VirtualProtect(IAT_ENTRIES[1], sizeof(DWORD), oldprotect, &oldprotect);
+                    VirtualProtect(IAT_ENTRIES[1], sizeof(void *), oldprotect, &oldprotect);
                 }
                 else if (strcmp(pImportByName->Name, "calloc") == 0) {
-                    irtualProtect(IAT_ENTRIES[2], sizeof(DWORD), PAGE_EXECUTE_READWRITE, &oldprotect);
+                    if (original_calloc == NULL) {
+                        pOriginalThunk++;
+                        continue;
+                    }
+                    VirtualProtect(IAT_ENTRIES[2], sizeof(void *), PAGE_EXECUTE_READWRITE, &oldprotect);
                     *(IAT_ENTRIES[0]) = original_calloc;
-                    VirtualProtect(IAT_ENTRIES[2], sizeof(DWORD), oldprotect, &oldprotect);
+                    VirtualProtect(IAT_ENTRIES[2], sizeof(void *), oldprotect, &oldprotect);
                 }
                 else if (strcmp(pImportByName->Name, "free") == 0) {
-                    irtualProtect(IAT_ENTRIES[3], sizeof(DWORD), PAGE_EXECUTE_READWRITE, &oldprotect);
+                    if (original_free == NULL) {
+                        pOriginalThunk++;
+                        continue;
+                    }
+                    VirtualProtect(IAT_ENTRIES[3], sizeof(void *), PAGE_EXECUTE_READWRITE, &oldprotect);
                     *(IAT_ENTRIES[0]) = original_free;
-                    VirtualProtect(IAT_ENTRIES[3], sizeof(DWORD), oldprotect, &oldprotect);
+                    VirtualProtect(IAT_ENTRIES[3], sizeof(void *), oldprotect, &oldprotect);
                 }
             }
             pOriginalThunk++;
@@ -119,30 +132,34 @@ int MallocDebug_Init() {
             if (!(pOriginalThunk->u1.Ordinal & IMAGE_ORDINAL_FLAG64)) {
                 // Import by name
                 IMAGE_IMPORT_BY_NAME* pImportByName = (IMAGE_IMPORT_BY_NAME*)(pOriginalThunk->u1.AddressOfData + (BYTE*)pDosHeader);
-
                 //
-                //  **MALLOC**
+                //  MALLOC
                 //
                 if (strcmp(pImportByName->Name, "malloc") == 0) {
+                    // the function was already found
+                    if (original_malloc != NULL) {
+                        pOriginalThunk++;
+                        continue;
+                    }
                     // Get the original address of malloc function
                     original_malloc = (void *)pThunk->u1.Function;
                     
                     // Get address of malloc function in the IAT table
                     IAT_ENTRIES[0] = (void**)&(pThunk->u1.Function);
-
-                    printf("Original malloc address: %p\n",(void*) pThunk->u1.Function);
-                    printf("Address of malloc in IAT table %p\n", &(pThunk->u1.Function));
-                    printf("Address of our malloc function %p\n", MallocDebug_malloc);
                     
                     // Change the address 
-                    VirtualProtect(IAT_ENTRIES[0], sizeof(DWORD), PAGE_EXECUTE_READWRITE, &oldprotect);
+                    VirtualProtect(IAT_ENTRIES[0], sizeof(void *), PAGE_EXECUTE_READWRITE, &oldprotect);
                     *(IAT_ENTRIES[0]) = MallocDebug_malloc;
-                    VirtualProtect(IAT_ENTRIES[0], sizeof(DWORD), oldprotect, &oldprotect);
+                    VirtualProtect(IAT_ENTRIES[0], sizeof(void *), oldprotect, &oldprotect);
                 }
                 //
-                //  **MALLOC**
+                //  REALLOC
                 //
                 if (strcmp(pImportByName->Name, "realloc") == 0) {
+                    if (original_realloc != NULL) {
+                        pOriginalThunk++;
+                        continue;
+                    }
                     // Get the original address of malloc function
                     original_realloc = (void*)pThunk->u1.Function;
 
@@ -150,30 +167,40 @@ int MallocDebug_Init() {
                     IAT_ENTRIES[1] = (void**)&(pThunk->u1.Function);
 
                     // Change the address 
-                    VirtualProtect(IAT_ENTRIES[1], sizeof(DWORD), PAGE_EXECUTE_READWRITE, &oldprotect);
+                    VirtualProtect(IAT_ENTRIES[1], sizeof(void *), PAGE_EXECUTE_READWRITE, &oldprotect);
                     *(IAT_ENTRIES[1]) = MallocDebug_realloc;
-                    VirtualProtect(IAT_ENTRIES[1], sizeof(DWORD), oldprotect, &oldprotect);
+                    VirtualProtect(IAT_ENTRIES[1], sizeof(void *), oldprotect, &oldprotect);
                 }
+                //
+                // CALLOC
+                //
                 else if (strcmp(pImportByName->Name, "calloc") == 0) {
+                    if (original_calloc != NULL) {
+                        pOriginalThunk++;
+                        continue;
+                    }
+
                     original_calloc = (void*)pThunk->u1.Function;
                     IAT_ENTRIES[2] = (void**)&(pThunk->u1.Function);
 
-                    VirtualProtect(IAT_ENTRIES[2], sizeof(DWORD), PAGE_EXECUTE_READWRITE, &oldprotect);
-                    *(IAT_ENTRIES[2]) = MallocDebug_realloc;
-                    VirtualProtect(IAT_ENTRIES[2], sizeof(DWORD), oldprotect, &oldprotect);
+                    VirtualProtect(IAT_ENTRIES[2], sizeof(void *), PAGE_EXECUTE_READWRITE, &oldprotect);
+                    *(IAT_ENTRIES[2]) = MallocDebug_calloc;
+                    VirtualProtect(IAT_ENTRIES[2], sizeof(void *), oldprotect, &oldprotect);
                 }
+                //
+                // FREE
+                //
                 else if (strcmp(pImportByName->Name, "free") == 0) {
-                    original_calloc = (void*)pThunk->u1.Function;
+                    if (original_free != NULL) {
+                        pOriginalThunk++;
+                        continue;
+                    }
+                    original_free = (void*)pThunk->u1.Function;
                     IAT_ENTRIES[3] = (void**)&(pThunk->u1.Function);
-
-                    VirtualProtect(IAT_ENTRIES[3], sizeof(DWORD), PAGE_EXECUTE_READWRITE, &oldprotect);
-                    *(IAT_ENTRIES[3]) = MallocDebug_realloc;
-                    VirtualProtect(IAT_ENTRIES[3], sizeof(DWORD), oldprotect, &oldprotect);
+                    VirtualProtect(IAT_ENTRIES[3], sizeof(void *), PAGE_EXECUTE_READWRITE, &oldprotect);
+                    *(IAT_ENTRIES[3]) = MallocDebug_free;
+                    VirtualProtect(IAT_ENTRIES[3], sizeof(void *), oldprotect, &oldprotect);
                 }
-            }
-            else {
-                // Import by ordinal
-                // printf("\tImported by ordinal %lld\n", pOriginalThunk->u1.Ordinal & 0xFFFF);
             }
             pOriginalThunk++;
             pThunk++;
@@ -187,25 +214,109 @@ int MallocDebug_Init() {
 void* MallocDebug_malloc(size_t size) {
     printf("This is my malloc");
     void* p = original_malloc(size);
+    if (counter < ARR_SIZE) {
+        if (p == NULL) {
+            printf("Failed to allocate memory of size %d\n", (int) size);
+            // size -1 means that the allocation failed
+            allocated_memory[counter].size = -1;
+        }
+        else {
+            allocated_memory[counter].size = size;
+            allocated_memory[counter].ptr = p;
+            allocated_memory[counter].allocated = 'y';
+        }
+    }
+    else{
+        printf("Maximum number of allocation records exceeded. No logs and leak controls for further allocations from this point.\n");
+    }
+    counter++;
     return p;
+}
+// Finds index of Allocated memory
+int find_index(void* ptr) {
+    for (int i = 0; i < counter; i++) {
+        if (allocated_memory[i].ptr == ptr && allocated_memory[i].allocated == 'y') {
+            return i;
+        }
+    }
+    return -1;
 }
 
 void* MallocDebug_realloc(void* ptr, size_t new_size) {
-    return ptr;
+    int i = find_index(ptr);
+    if (i == -1) {
+        printf("Unable to find %p in memory", ptr);
+        return ptr;
+    }
+    
+    void* ptr2 = original_realloc(ptr, new_size);
+    if (ptr2 == NULL) {
+        printf("Realloc failed, the original pointer remains");
+        return ptr;
+    }
+    allocated_memory[i].ptr = ptr2;
+    allocated_memory[i].size = new_size;
+    return ptr2;
+}
+int check_leaky_memory() {
+    int leaky_count = 0;
+    for (int i = 0; i < ARR_SIZE; i++) {
+        AllocationRecord* a = &(allocated_memory[i]);
+        if (a->allocated == 'y' && a->ptr != NULL) {
+            printf("Leak at %p of size %d\n", a->ptr, (int)a->size);
+            leaky_count++;
+        }
+    }
+    return leaky_count;
 }
 void* MallocDebug_calloc(size_t num, size_t size) {
-    return NULL;
+    printf("This is my CALLOC\n");
+    void* p = original_calloc(num, size);
+    if (counter < ARR_SIZE) {
+        if (p == NULL) {
+            printf("Failed to allocate memory of size %d\n", (int)(size*num));
+            allocated_memory[counter].size = -1;
+        }
+        else {
+            allocated_memory[counter].size = size*num;
+            allocated_memory[counter].ptr = p;
+            allocated_memory[counter].allocated = 'y';
+        }
+    }
+    else {
+        printf("Maximum number of allocation records exceeded\n");
+        exit(1);
+    }
+    counter++;
+    return p;
 }
-void* MallocDebug_free(void* ptr) {
-    return NULL;
+void MallocDebug_free(void* ptr) {
+    int i = find_index(ptr);
+    if (i == -1) {
+        printf("The pointer to the memory does not exist\n");
+    }
+    else if (allocated_memory[i].size >= 0) {
+        original_free(allocated_memory[i].ptr);
+        allocated_memory[i].ptr = NULL;
+        allocated_memory[i].size = -1;
+        allocated_memory[i].allocated = 'n';
+    }
+    else {
+        printf("Pointer %p cannot be freed because it points to memory that failed to allocate.\n", allocated_memory[i].ptr);
+    }
 }
 
 int main()
 {
     initialise_allocation_records();
     MallocDebug_Init();
+    MallocDebug_Init();
+    MallocDebug_Init();
     void* test = malloc(100);
+    void* b = calloc(10, 4);
     free(test);
+    free(NULL);
+    MallocDebug_Done();
     return 0;
 }
 
