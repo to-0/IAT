@@ -117,7 +117,7 @@ int MallocDebug_Init() {
     PIMAGE_IMPORT_DESCRIPTOR pImportDescriptor = (PIMAGE_IMPORT_DESCRIPTOR)(((BYTE*)pDosHeader) + pNTHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress);
     // pointer to very last image_import descriptor which no longer exists
     PIMAGE_IMPORT_DESCRIPTOR pImportDescriptorEnd = (PIMAGE_IMPORT_DESCRIPTOR)(((BYTE*)pImportDescriptor) + pNTHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].Size);
-
+    MEMORY_BASIC_INFORMATION memory_basic_info;
     while (pImportDescriptor < pImportDescriptorEnd && pImportDescriptor->Name != 0) {
         char* dll_library_name = (char*)(pImportDescriptor->Name + ((BYTE*)pDosHeader));
         printf("%s\n", dll_library_name);
@@ -144,6 +144,8 @@ int MallocDebug_Init() {
                     // Get the original address of malloc function
                     original_malloc = (void *)pThunk->u1.Function;
                     
+                    VirtualQuery(pThunk->u1.Function, &memory_basic_info, sizeof(memory_basic_info));
+
                     // Get address of malloc function in the IAT table
                     IAT_ENTRIES[0] = (void**)&(pThunk->u1.Function);
                     
@@ -254,8 +256,14 @@ void* MallocDebug_realloc(void* ptr, size_t new_size) {
         printf("Realloc failed, the original pointer remains");
         return ptr;
     }
-    allocated_memory[i].ptr = ptr2;
-    allocated_memory[i].size = new_size;
+    allocated_memory[i].ptr = NULL;
+    allocated_memory[i].size = -1;
+    allocated_memory[i].allocated = 'n';
+
+    allocated_memory[counter].ptr = ptr2;
+    allocated_memory[counter].size = new_size;
+    allocated_memory[counter].allocated = 'y';
+    counter++;
     return ptr2;
 }
 int check_leaky_memory() {
@@ -276,18 +284,19 @@ void* MallocDebug_calloc(size_t num, size_t size) {
         if (p == NULL) {
             printf("Failed to allocate memory of size %d\n", (int)(size*num));
             allocated_memory[counter].size = -1;
+            return NULL;
         }
         else {
             allocated_memory[counter].size = size*num;
             allocated_memory[counter].ptr = p;
             allocated_memory[counter].allocated = 'y';
+            counter++;
         }
     }
     else {
         printf("Maximum number of allocation records exceeded\n");
-        exit(1);
     }
-    counter++;
+    
     return p;
 }
 void MallocDebug_free(void* ptr) {
@@ -308,6 +317,7 @@ void MallocDebug_free(void* ptr) {
 
 int main()
 {
+    void* ghost = malloc(1);
     initialise_allocation_records();
     MallocDebug_Init();
     MallocDebug_Init();
