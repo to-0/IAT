@@ -3,24 +3,29 @@
 #include <stdio.h>
 #include <windows.h>
 
+
 void* (*original_malloc)(size_t size) = NULL; 
 void* (*original_realloc)(void*ptr, size_t new_size) = NULL;
 void* (*original_calloc)(size_t num, size_t size) = NULL ;
 void (*original_free)(void *ptr) = NULL;
 #define ARR_SIZE 2000
 #define CHECK_VIRTUAL_PROTECT(ptr, size, newProtect, oldProtect) \
-    if (!VirtualProtect(ptr, size, newProtect, oldProtect)) { \
+    if (newProtect != NULL){ \
+        if (!VirtualProtect(ptr, size, newProtect, oldProtect)) { \
         printf("VirtualProtect failed with error code: %ld\n", GetLastError()); \
-        pOriginalThunk++; \
-        pThunk++;\
-        continue;\
+        } \
     }
+        /*pOriginalThunk++; \
+        pThunk++;\
+        continue;\*/
+        
 
 
-DWORD oldprotect;
+DWORD oldprotect = NULL;
+char static_libName[150] = { "\0" };
 
 typedef struct AllocationRecord {
-    int size;
+    size_t size;
     void* ptr;
 }AllocationRecord;
 
@@ -28,7 +33,7 @@ AllocationRecord allocation_records[ARR_SIZE];
 int counter = 0;
 void initialise_allocation_records() {
     for (int i = 0; i < ARR_SIZE; i++) {
-        allocation_records[i].size = -1;
+        allocation_records[i].size = 0;
         allocation_records[i].ptr = NULL;
     }
 }
@@ -46,9 +51,9 @@ int MallocDebug_Done() {
     PIMAGE_NT_HEADERS pNTHeaders = (PIMAGE_NT_HEADERS)(((BYTE*)pDosHeader) + pDosHeader->e_lfanew);
 
     PIMAGE_IMPORT_DESCRIPTOR pImportDescriptor = (PIMAGE_IMPORT_DESCRIPTOR)(((BYTE*)pDosHeader) + pNTHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress);
-   /* PIMAGE_IMPORT_DESCRIPTOR pImportDescriptorEnd = (PIMAGE_IMPORT_DESCRIPTOR)(((BYTE*)pImportDescriptor) + pNTHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].Size);*/
+    PIMAGE_IMPORT_DESCRIPTOR pImportDescriptorEnd = (PIMAGE_IMPORT_DESCRIPTOR)(((BYTE*)pImportDescriptor) + pNTHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].Size);
 
-    while (pImportDescriptor->Characteristics != NULL) {
+    while (pImportDescriptor < pImportDescriptorEnd && pImportDescriptor->Characteristics != NULL) {
         // Get first thunk IAT, this one is gonna be rewritten with addresses of our functions
         IMAGE_THUNK_DATA* pThunk = (IMAGE_THUNK_DATA*)(pImportDescriptor->FirstThunk + ((BYTE*)pDosHeader));
         // Get the original first thunk (INT)
@@ -56,10 +61,19 @@ int MallocDebug_Done() {
         
         // Check if we are processing ucrtbased library, skip others
         char* libName = (char*)((BYTE*)pDosHeader + pImportDescriptor->Name);
-        if (!strcmp(libName, "ucrtbased.dll")) {
+        //strcpy_s(static_libName, libName);
+        int i = 0;
+        while (libName[i]!='\0') {
+            static_libName[i] = tolower(libName[i]);
+            i++;
+        }
+        static_libName[i] = '\0';
+        // if library name is not ucrtbased.dll skip, returns 0 when 
+        if (strcmp(static_libName, "ucrtbased.dll") != 0) {
             pImportDescriptor++;
             continue;
         }
+
         // Get imported functions
         while (pOriginalThunk->u1.AddressOfData != 0) {
             if (!(pOriginalThunk->u1.Ordinal & IMAGE_ORDINAL_FLAG64)) {
@@ -118,8 +132,6 @@ int MallocDebug_Done() {
 int MallocDebug_Init() {
     HMODULE hPEFile = GetModuleHandle(NULL); 
     PIMAGE_DOS_HEADER pDosHeader = (PIMAGE_DOS_HEADER)hPEFile;
-    /*printf("Address of hPEFile: %p\n", (void*)hPEFile);
-    printf("Starting address of the process %p\n", (BYTE*)pDosHeader);*/
     // pDosHeader->e_lfanew is RVA 
     PIMAGE_NT_HEADERS pNTHeaders = (PIMAGE_NT_HEADERS)(((BYTE*)pDosHeader) + pDosHeader->e_lfanew);
 
@@ -128,8 +140,8 @@ int MallocDebug_Init() {
     PIMAGE_IMPORT_DESCRIPTOR pImportDescriptor = (PIMAGE_IMPORT_DESCRIPTOR)(((BYTE*)pDosHeader) + pNTHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress);
     // pointer to very last image_import descriptor which no longer exists
     PIMAGE_IMPORT_DESCRIPTOR pImportDescriptorEnd = (PIMAGE_IMPORT_DESCRIPTOR)(((BYTE*)pImportDescriptor) + pNTHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].Size);
-    MEMORY_BASIC_INFORMATION memory_basic_info;
-    while (pImportDescriptor < pImportDescriptorEnd && pImportDescriptor->Name != 0) {
+    
+    while (pImportDescriptor < pImportDescriptorEnd && pImportDescriptor->Characteristics != NULL) {
         char* dll_library_name = (char*)(pImportDescriptor->Name + ((BYTE*)pDosHeader));
         //printf("%s\n", dll_library_name);
 
@@ -137,6 +149,19 @@ int MallocDebug_Init() {
         IMAGE_THUNK_DATA* pThunk = (IMAGE_THUNK_DATA*)(pImportDescriptor->FirstThunk + ((BYTE*)pDosHeader));
         // Get the original first thunk (INT)
         IMAGE_THUNK_DATA* pOriginalThunk = (IMAGE_THUNK_DATA*)(pImportDescriptor->OriginalFirstThunk + ((BYTE*)pDosHeader));
+        // Check if we are processing ucrtbased library, skip others
+        char* libName = (char*)((BYTE*)pDosHeader + pImportDescriptor->Name);
+        int i = 0;
+        while (libName[i] != '\0') {
+            static_libName[i] = tolower(libName[i]);
+            i++;
+        }
+        static_libName[i] = '\0';
+        // if library name is not ucrtbased.dll skip, returns 0 when 
+        if (strcmp(static_libName, "ucrtbased.dll") != 0) {
+            pImportDescriptor++;
+            continue;
+        }
 
         // Get imported functions
         while (pOriginalThunk->u1.AddressOfData != 0) {
@@ -231,56 +256,108 @@ void* MallocDebug_malloc(size_t size) {
 }
 // Finds index of allocated memory
 int find_index(void* ptr) {
+    if (ptr == NULL) {
+        return -1;
+    }
     for (int i = 0; i < counter; i++) {
-        if (allocation_records[i].ptr == ptr && allocation_records[i].size != -1) {
+        if (allocation_records[i].ptr == ptr) {
             return i;
         }
     }
-    return -1;
+    //Unknown
+    return -2;
 }
 
+//void* MallocDebug_realloc(void* ptr, size_t new_size) {
+//    if (ptr == NULL) {
+//        printf("Realloc: Ptr argument is NULL the program will act as malloc(%d).\n", (int)new_size);
+//    }
+//    int i = find_index(ptr);
+//        if (i == -1) {
+//        printf("Realloc: Unable to find %p in allocation records\n", ptr);
+//    }
+//    if (new_size == 0) {
+//        printf("Realloc: Request to resize to zero. Behavior is implementation-defined. In our case realloc will return NULL and old memory block will be freed but left pointing to the block.\n");
+//
+//    }
+//   
+//    // Run the original realloc
+//    void* ptr2 = original_realloc(ptr, new_size);
+//    if (ptr2 == NULL) {
+//        if (i != -1 && allocation_records[i].ptr != NULL && new_size != 0) {
+//            printf("Realloc: Realloc of size %d returned NULL, not enough memory. Old memory block remains.\n", (int) new_size);
+//        }
+//        else {
+//            printf("Realloc: Realloc of size %d returned NULL, the original pointer remains.\n", (int)new_size);
+//        }
+//    }
+//    else {
+//        if (i != -1) {
+//            // Remove the original allocated record
+//            allocation_records[i].ptr = NULL;
+//            allocation_records[i].size = 0;
+//        }
+//        // Add new record
+//        if (counter < ARR_SIZE) {
+//            allocation_records[counter].ptr = ptr2;
+//            allocation_records[counter].size = new_size;
+//            counter++;
+//        }
+//    }
+//    return ptr2;
+//}
 void* MallocDebug_realloc(void* ptr, size_t new_size) {
+    // Run the original realloc
     int i = find_index(ptr);
-    if (i == -1) {
-        printf("Realloc: Unable to find %p in allocation records\n", ptr);
-        
-    }
-    else if (allocation_records[i].ptr == NULL) {
-        printf("Realloc: Allocation record ptr is null, calling realloc will lead to undefined behavior.\n");
-    }
-
-    if (new_size == 0) {
-        printf("Realloc: Request to resize to zero. Behavior is implementation-defined.\n");
-
-    }
-    if (ptr == NULL) {
-        printf("Realloc: Ptr argument is NULL the program will most likely fail.\n", (int)new_size);
-    }
-    if (new_size < 0) {
-        printf("Realloc: Allocating negative size, the program will fail. \n");
-    }
     void* ptr2 = original_realloc(ptr, new_size);
-    if (ptr2 == NULL) {
-        if (i != -1 && allocation_records[i].ptr != NULL && new_size != 0) {
-            printf("Realloc: Realloc of size %d returned NULL, not enough memory\n", (int) new_size);
-        }
-        else {
-            printf("Realloc: Realloc of size %d returned NULL, the original pointer remains\n", (int)new_size);
-        }
+    if (ptr == NULL) {
+        printf("Realloc: Ptr argument is NULL the realloc will act as malloc(%d).\n", (int)new_size);
     }
     else {
-        if (i != -1) {
-            // Remove the original allocated record
-            allocation_records[i].ptr = NULL;
-            allocation_records[i].size = -1;
+        if (i == -2) {
+            printf("Realloc: Unable to find %p in allocation records. Working with unknown pointer.\n", ptr);
         }
-        // Add new record
-        if (counter < ARR_SIZE) {
+
+    }
+    // Realloc failed
+    if (ptr2 == NULL) {
+        if (i >= 0 && allocation_records[i].ptr != NULL) {
+            if (new_size != 0) {
+                printf("Realloc: Realloc of size %d returned NULL, not enough memory. Old memory block remains.\n", (int)new_size);
+            }
+            else if (new_size == 0) {
+                printf("Realloc: Ptr was null but new_size requested was also 0, realloc will return 0 no new memory allocated.\n");
+            }
+            else {
+                printf("Realloc: Request to resize to 0, the old memory block is freed and realloc returns NULL\n");
+                // Delete the old memory block, because it has been freed, only the pointer remains
+                allocation_records[i].ptr = NULL;
+                allocation_records[i].size = 0;
+            }
+        }
+    }
+    // Realloc was successfull
+    else {
+        // Pointer to memory stayed the same it just expanded/shrinked
+        if (ptr = ptr2 && i >= 0) {
+            // Remove the original allocated record
+            allocation_records[i].ptr = ptr2;
+            allocation_records[i].size = new_size;
+            
+        }
+        // Pointer has changed, new space has been allocated
+        else if (ptr != ptr2 && i >= 0) {
+            allocation_records[i].ptr = NULL;
+            allocation_records[i].size = 0;
+        }
+        // Add new record if the memory has been reallocated somewhere else
+        if (ptr != ptr2 && counter < ARR_SIZE) {
             allocation_records[counter].ptr = ptr2;
             allocation_records[counter].size = new_size;
             counter++;
         }
     }
+    printf("Realloc: Returning %p the original ptr was %p\n", ptr2, ptr);
     return ptr2;
 }
 
@@ -317,10 +394,14 @@ void MallocDebug_free(void* ptr) {
         printf("Free: The pointer to the memory does not exist\n");
         original_free(ptr);
     }
+    else if (i == -2) {
+        printf("Free: Pointer to the unknown memory block\n");
+        original_free(ptr);
+    }
     else {
         original_free(allocation_records[i].ptr);
         allocation_records[i].ptr = NULL;
-        allocation_records[i].size = -1;
+        allocation_records[i].size = NULL;
     }
    
 }
@@ -335,20 +416,22 @@ int main()
     // multiple inits
     MallocDebug_Init();
     MallocDebug_Init();
-    //MallocDebug_Init();
-    void* test = malloc(100);
+    ////MallocDebug_Init();
+    //void* test = malloc(100);
+    //void* test2 = malloc(0);
     void* b = calloc(10, 4);
-    free(test);
-    free(NULL);
+    //free(test);
+    //free(NULL);
     void* fail = malloc(100000000000000);
     void* r = realloc(b, 20);
+    //free(b);
     void* r2 = realloc(r, 0);
     // These 2 will make program fail
-    //void* r3 = realloc(NULL, 10);
-    //void* realloc_fail = realloc(r, -20);
+    void* r3 = realloc(r2, 10); // should be equal to realloc(NULL, 10) because r2 is going to be null 
+    void* test3 = realloc(NULL, 0);
     // multiple debug_done
     MallocDebug_Done();
-    MallocDebug_Done();
+    //MallocDebug_Done();
     return 0;
 }
 
