@@ -68,12 +68,11 @@ int MallocDebug_Done() {
             i++;
         }
         static_libName[i] = '\0';
-        // if library name is not ucrtbased.dll skip, returns 0 when 
+        // if library name is not ucrtbased.dll skip, returns 0 when they are equal 
         if (strcmp(static_libName, "ucrtbased.dll") != 0) {
             pImportDescriptor++;
             continue;
         }
-
         // Get imported functions
         while (pOriginalThunk->u1.AddressOfData != 0) {
             if (!(pOriginalThunk->u1.Ordinal & IMAGE_ORDINAL_FLAG64)) {
@@ -121,7 +120,6 @@ int MallocDebug_Done() {
             pOriginalThunk++;
             pThunk++;
         }
-        // IMAGE_IMPORT_BY_NAME* imgImport_By_name = (IMAGE_IMPORT_BY_NAME*)(pThunk->u1.AddressOfData + (BYTE*)pDosHeader);
         pImportDescriptor++;
     }
     int n_leaks = check_leaky_memory();
@@ -157,12 +155,10 @@ int MallocDebug_Init() {
             i++;
         }
         static_libName[i] = '\0';
-        // if library name is not ucrtbased.dll skip, returns 0 when 
         if (strcmp(static_libName, "ucrtbased.dll") != 0) {
             pImportDescriptor++;
             continue;
         }
-
         // Get imported functions
         while (pOriginalThunk->u1.AddressOfData != 0) {
             if (!(pOriginalThunk->u1.Ordinal & IMAGE_ORDINAL_FLAG64)) {
@@ -265,101 +261,57 @@ int find_index(void* ptr) {
         }
     }
     //Unknown
-    return -2;
+    return -1;
 }
-
-//void* MallocDebug_realloc(void* ptr, size_t new_size) {
-//    if (ptr == NULL) {
-//        printf("Realloc: Ptr argument is NULL the program will act as malloc(%d).\n", (int)new_size);
-//    }
-//    int i = find_index(ptr);
-//        if (i == -1) {
-//        printf("Realloc: Unable to find %p in allocation records\n", ptr);
-//    }
-//    if (new_size == 0) {
-//        printf("Realloc: Request to resize to zero. Behavior is implementation-defined. In our case realloc will return NULL and old memory block will be freed but left pointing to the block.\n");
-//
-//    }
-//   
-//    // Run the original realloc
-//    void* ptr2 = original_realloc(ptr, new_size);
-//    if (ptr2 == NULL) {
-//        if (i != -1 && allocation_records[i].ptr != NULL && new_size != 0) {
-//            printf("Realloc: Realloc of size %d returned NULL, not enough memory. Old memory block remains.\n", (int) new_size);
-//        }
-//        else {
-//            printf("Realloc: Realloc of size %d returned NULL, the original pointer remains.\n", (int)new_size);
-//        }
-//    }
-//    else {
-//        if (i != -1) {
-//            // Remove the original allocated record
-//            allocation_records[i].ptr = NULL;
-//            allocation_records[i].size = 0;
-//        }
-//        // Add new record
-//        if (counter < ARR_SIZE) {
-//            allocation_records[counter].ptr = ptr2;
-//            allocation_records[counter].size = new_size;
-//            counter++;
-//        }
-//    }
-//    return ptr2;
-//}
 void* MallocDebug_realloc(void* ptr, size_t new_size) {
-    // Run the original realloc
     int i = find_index(ptr);
     void* ptr2 = original_realloc(ptr, new_size);
-    if (ptr == NULL) {
-        printf("Realloc: Ptr argument is NULL the realloc will act as malloc(%d).\n", (int)new_size);
-    }
-    else {
-        if (i == -2) {
-            printf("Realloc: Unable to find %p in allocation records. Working with unknown pointer.\n", ptr);
-        }
 
-    }
-    // Realloc failed
-    if (ptr2 == NULL) {
-        if (i >= 0 && allocation_records[i].ptr != NULL) {
-            if (new_size != 0) {
-                printf("Realloc: Realloc of size %d returned NULL, not enough memory. Old memory block remains.\n", (int)new_size);
-            }
-            else if (new_size == 0) {
-                printf("Realloc: Ptr was null but new_size requested was also 0, realloc will return 0 no new memory allocated.\n");
-            }
-            else {
-                printf("Realloc: Request to resize to 0, the old memory block is freed and realloc returns NULL\n");
-                // Delete the old memory block, because it has been freed, only the pointer remains
-                allocation_records[i].ptr = NULL;
-                allocation_records[i].size = 0;
-            }
-        }
-    }
-    // Realloc was successfull
-    else {
-        // Pointer to memory stayed the same it just expanded/shrinked
-        if (ptr = ptr2 && i >= 0) {
-            // Remove the original allocated record
-            allocation_records[i].ptr = ptr2;
-            allocation_records[i].size = new_size;
-            
-        }
-        // Pointer has changed, new space has been allocated
-        else if (ptr != ptr2 && i >= 0) {
-            allocation_records[i].ptr = NULL;
-            allocation_records[i].size = 0;
-        }
-        // Add new record if the memory has been reallocated somewhere else
-        if (ptr != ptr2 && counter < ARR_SIZE) {
+    if (ptr == NULL) {
+        printf("Realloc: Ptr argument is NULL; realloc acts as malloc(%d).\n", (int)new_size);
+        // Realloc (malloc) succeeded
+        if (ptr2 != NULL && counter < ARR_SIZE) {
+            printf("Realloc: Block of size %d has been allocated at %p\n", (int)new_size, ptr2);
             allocation_records[counter].ptr = ptr2;
             allocation_records[counter].size = new_size;
             counter++;
+        } else if (ptr2 == NULL && new_size != 0) {
+            printf("Realloc: malloc(%d) failed; not enough memory.\n", (int)new_size);
+        }
+    } else {
+        if (i == -1) {
+            printf("Realloc: Unable to find %p in allocation records. Working with unknown pointer.\n", ptr);
+        }
+        //Realloc failed
+        if (ptr2 == NULL) {
+            if (new_size == 0) {
+                printf("Realloc: Requested size 0; the original block %p has been freed.\n", ptr);
+                // We have index of the original block
+                if (i >= 0) {
+                    allocation_records[i].ptr = NULL;
+                    allocation_records[i].size = 0;
+                }
+            } else {
+                printf("Realloc: Realloc of size %d returned NULL; not enough memory. Old memory block remains.\n", (int)new_size);
+            }
+        // Realloc succeeded
+        } else {
+            // We have info. about the old block
+            if (i >= 0) {
+                allocation_records[i].ptr = ptr2;
+                allocation_records[i].size = new_size;
+            // Old block has not been found
+            } else if (counter < ARR_SIZE) {
+                allocation_records[counter].ptr = ptr2;
+                allocation_records[counter].size = new_size;
+                counter++;
+            }
         }
     }
-    printf("Realloc: Returning %p the original ptr was %p\n", ptr2, ptr);
     return ptr2;
 }
+
+
 
 int check_leaky_memory() {
     int leaky_count = 0;
@@ -417,8 +369,8 @@ int main()
     MallocDebug_Init();
     MallocDebug_Init();
     ////MallocDebug_Init();
-    //void* test = malloc(100);
-    //void* test2 = malloc(0);
+    void* test = malloc(100);
+    void* test2 = malloc(0);
     void* b = calloc(10, 4);
     //free(test);
     //free(NULL);
